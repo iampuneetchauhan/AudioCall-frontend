@@ -33,7 +33,7 @@ export const connectUsers = async (fromUserId: string, toUserId: string) => {
   }
 }
 
-// ✅ Optional: Fetch user info (if your backend has auth routes)
+
 export const getUserProfile = async (userId: string) => {
   try {
     const res = await api.get(`/users/${userId}`)
