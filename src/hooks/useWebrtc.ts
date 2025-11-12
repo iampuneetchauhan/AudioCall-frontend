@@ -16,8 +16,21 @@ export const useWebRTCAudio = (socket: Socket | null, userId: string) => {
   const [isCaller, setIsCaller] = useState(false);
   const [remoteUser, setRemoteUser] = useState<string | null>(null);
 
+  // ✅ FIX: add TURN fallback for guaranteed NAT traversal (works behind firewalls)
   const rtcConfig: RTCConfiguration = {
-    iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+    iceServers: [
+      { urls: "stun:stun.l.google.com:19302" },
+      {
+        urls: "turn:openrelay.metered.ca:80",
+        username: "openrelayproject",
+        credential: "openrelayproject",
+      },
+      {
+        urls: "turn:openrelay.metered.ca:443",
+        username: "openrelayproject",
+        credential: "openrelayproject",
+      },
+    ],
   };
 
   // 🧹 Cleanup
@@ -60,23 +73,38 @@ export const useWebRTCAudio = (socket: Socket | null, userId: string) => {
           remoteAudioRef.current.srcObject = stream;
           remoteAudioRef.current.autoplay = true;
 
+          // ✅ FIX: ensure autoplay even if browser blocks it
           const tryPlay = async () => {
             try {
               await remoteAudioRef.current!.play();
             } catch {
-              document.addEventListener("click", () => {
-                remoteAudioRef.current!.play().catch(() => {});
-              });
+              document.addEventListener(
+                "click",
+                () => {
+                  remoteAudioRef.current!.play().catch(() => {});
+                },
+                { once: true }
+              );
             }
           };
           tryPlay();
         }
       };
 
-      pc.onconnectionstatechange = () => {
-        if (pc.connectionState === "connected") setInCall(true);
-        if (["disconnected", "failed", "closed"].includes(pc.connectionState)) {
-          cleanup();
+      // ✅ FIX: wait before hangup on temporary disconnections
+      pc.oniceconnectionstatechange = () => {
+        console.log("ICE:", pc.iceConnectionState);
+        if (pc.iceConnectionState === "connected") setInCall(true);
+        if (["failed", "disconnected"].includes(pc.iceConnectionState)) {
+          setTimeout(() => {
+            if (
+              ["failed", "disconnected"].includes(pc.iceConnectionState) &&
+              pcRef.current === pc
+            ) {
+              console.warn("Connection lost, cleaning up");
+              cleanup();
+            }
+          }, 4000);
         }
       };
 
@@ -87,6 +115,8 @@ export const useWebRTCAudio = (socket: Socket | null, userId: string) => {
 
   // 🎙️ Local stream setup
   const setupLocalStream = useCallback(async () => {
+    // ✅ FIX: unified local stream initialization
+    if (localStreamRef.current) return localStreamRef.current;
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true },
     });
@@ -116,11 +146,11 @@ export const useWebRTCAudio = (socket: Socket | null, userId: string) => {
       const pc = createPeerConnection(targetId);
       pcRef.current = pc;
 
-      // ✅ Attach local audio BEFORE offer
       const stream = await setupLocalStream();
+      // ✅ FIX: ensure local track reattached fresh before offer
       stream.getTracks().forEach((t) => pc.addTrack(t, stream));
 
-      const offer = await pc.createOffer();
+      const offer = await pc.createOffer({ offerToReceiveAudio: true });
       await pc.setLocalDescription(offer);
 
       socket.emit("call-user", { from: userId, to: targetId });
@@ -142,7 +172,6 @@ export const useWebRTCAudio = (socket: Socket | null, userId: string) => {
     const pc = createPeerConnection(from);
     pcRef.current = pc;
 
-    // 🎙️ Attach local before telling accepted
     const stream = await setupLocalStream();
     stream.getTracks().forEach((t) => pc.addTrack(t, stream));
 
@@ -181,7 +210,6 @@ export const useWebRTCAudio = (socket: Socket | null, userId: string) => {
       setIncomingCall({ from, name });
     };
 
-    // call response handling
     const handleCallResponse = async ({ from, accepted }: any) => {
       if (!accepted) {
         cleanup();
@@ -189,14 +217,13 @@ export const useWebRTCAudio = (socket: Socket | null, userId: string) => {
       }
       console.log("✅ Call accepted by", from);
 
-      // now actually start WebRTC offer
       const pc = createPeerConnection(from);
       pcRef.current = pc;
 
       const stream = await setupLocalStream();
       stream.getTracks().forEach((t) => pc.addTrack(t, stream));
 
-      const offer = await pc.createOffer();
+      const offer = await pc.createOffer({ offerToReceiveAudio: true });
       await pc.setLocalDescription(offer);
 
       socket.emit("signal", { to: from, data: { sdp: offer } });
@@ -207,7 +234,7 @@ export const useWebRTCAudio = (socket: Socket | null, userId: string) => {
       if (!pcRef.current) pcRef.current = createPeerConnection(from);
       const pc = pcRef.current!;
 
-      // Ensure local stream before handling SDP
+      // ✅ FIX: always ensure local stream exists before SDP
       if (!localStreamRef.current) {
         const stream = await setupLocalStream();
         stream.getTracks().forEach((t) => pc.addTrack(t, stream));
@@ -220,7 +247,7 @@ export const useWebRTCAudio = (socket: Socket | null, userId: string) => {
           console.log("📩 Got offer from", from);
           await pc.setRemoteDescription(desc);
 
-          const answer = await pc.createAnswer();
+          const answer = await pc.createAnswer({ offerToReceiveAudio: true });
           await pc.setLocalDescription(answer);
 
           socket.emit("signal", { to: from, data: { sdp: answer } });
